@@ -1628,9 +1628,30 @@ const PARAMS_DEFAULTS = {
       },
       critico: {
         lbl:     'Operación crítica 24×7',
-        max8x5:  1.20, piso8x5:  0.42,
-        max24x7: 1.75, piso24x7: 0.67,
+        // Recalibrado −10% (2026-05-29) contra histórico real FICOHSA (tickets crudos:
+        // 604 h/año 8×5, 998 h/año 24×7). El modelo quedaba +20-26% sobre el real; bajado
+        // 10% para alinear con benchmark de mercado, manteniendo +13% (8×5) / +8% (24×7) de margen.
+        max8x5:  1.08, piso8x5:  0.378,
+        max24x7: 1.575, piso24x7: 0.603,
       },
+    },
+    // Equipos de BAJA CRITICIDAD (APs, cámaras IP, teléfonos IP): casi no generan
+    // tickets correctivos. Se cobran con tarifa escalonada plana en lugar de la curva
+    // del perfil, y se SUMAN al resto del inventario. (Decisión gerencial 2026-05-29)
+    bajaCrit: {
+      ids: ['ap', 'cam', 'tel_ip'],   // tipos del MP_CATALOG que entran aquí
+      sla24x7Mult: 1.3,               // 24×7 paga 30% más (costo de guardia nocturna)
+      // tramos: [hasta N equipos, horas/mes]. Por encima de 300 escala +1h cada 100.
+      tramos: [
+        { max: 10,  h: 0.75 },   // 45 min
+        { max: 25,  h: 1.00 },
+        { max: 50,  h: 1.25 },
+        { max: 100, h: 1.50 },
+        { max: 200, h: 1.75 },
+        { max: 300, h: 2.00 },
+      ],
+      sobre300Base: 3.0,   // 301–400 → 3h
+      sobre300Por100: 1.0, // +1h por cada 100 equipos adicionales arriba de 300
     },
   },
   mp: {
@@ -3433,6 +3454,15 @@ function scRenderInventory() {
   }).join('');
 }
 
+// Tarifa escalonada para equipos de baja criticidad (h/mes según cantidad total del grupo)
+function scHorasBajaCrit(N) {
+  if (N <= 0) return 0;
+  const B = PARAMS.sc.bajaCrit;
+  for (const t of B.tramos) { if (N <= t.max) return t.h; }
+  // N > 300: base + 1h por cada 100 equipos adicionales arriba de 300
+  return B.sobre300Base + Math.floor((N - 301) / 100) * B.sobre300Por100;
+}
+
 function calcSC() {
   const P = PARAMS.sc;
   const years  = n('sc_years');
@@ -3440,47 +3470,54 @@ function calcSC() {
   const perfil = document.getElementById('sc_perfil') ? document.getElementById('sc_perfil').value : 'estandar';
   if (!sc_inventory || sc_inventory.length === 0 || years <= 0) return Z();
 
-  // Total de equipos en el alcance
-  const N = sc_inventory.reduce((a, it) => a + it.qty, 0);
-  if (N <= 0) return Z();
+  // Separar inventario: baja criticidad (AP/cámara/teléfono IP) vs resto (curva del perfil)
+  const bajaIds = P.bajaCrit.ids;
+  let N_norm = 0, N_baja = 0;
+  for (const it of sc_inventory) {
+    if (bajaIds.includes(it.id)) N_baja += it.qty;
+    else                          N_norm += it.qty;
+  }
+  if (N_norm <= 0 && N_baja <= 0) return Z();
 
-  // Parámetros del perfil seleccionado (estandar | critico)
+  const meses = years * 12;
+  const es24x7 = sla === '24x7';
+
+  // === Grupo NORMAL: curva escalonada del perfil ===
   const Pp = P.perfiles[perfil] || P.perfiles.estandar;
-  // max y piso varían por SLA dentro del perfil
-  const max  = sla === '24x7' ? Pp.max24x7  : Pp.max8x5;
-  const piso = sla === '24x7' ? Pp.piso24x7 : Pp.piso8x5;
-
-  // Suma marginal por cada equipo (n=1 .. N) con curva escalonada:
-  //   Si n ≤ K       → marginal = max plena
-  //   Si n > K       → marginal = piso + (max − piso) × exp(−(n − K)/τ)
-  let horasMes = 0;
-  for (let i = 1; i <= N; i++) {
+  const max  = es24x7 ? Pp.max24x7  : Pp.max8x5;
+  const piso = es24x7 ? Pp.piso24x7 : Pp.piso8x5;
+  let horasMesNorm = 0;
+  for (let i = 1; i <= N_norm; i++) {
     let marg;
     if (i <= P.K) marg = max;
     else          marg = piso + (max - piso) * Math.exp(-(i - P.K) / P.tau);
-    horasMes += marg;
+    horasMesNorm += marg;
   }
 
-  const meses = years * 12;
-  const hTec = horasMes * meses;
+  // === Grupo BAJA CRITICIDAD: tarifa escalonada plana (× multiplicador si 24×7) ===
+  let horasMesBaja = scHorasBajaCrit(N_baja);
+  if (es24x7) horasMesBaja *= P.bajaCrit.sla24x7Mult;
 
-  // Lista de equipos para el reporte
-  const equiposTxt = sc_inventory
-    .map(it => {
-      const cat = MP_CATALOG.find(c => c.id === it.id);
-      return cat ? `${it.qty} ${cat.lbl}` : '';
-    })
-    .filter(s => s)
-    .join(', ');
+  const hTec = (horasMesNorm + horasMesBaja) * meses;
 
-  return { hTec,
-    desglose: [
-      { t:`Atención de tickets (${Pp.lbl}, SLA ${sla === '24x7' ? '24×7' : '8×5'})`,
-        f:`${max} h/mes/eq primeros ${P.K} — luego ${piso} h/mes/eq`,
-        h: hTec,
-        unit:`${N} equipos × ${horasMes.toFixed(2)} h/mes × ${meses} meses` },
-    ]
-  };
+  const slaTxt = es24x7 ? '24×7' : '8×5';
+  const desglose = [];
+  if (N_norm > 0) {
+    desglose.push({
+      t:`Atención de tickets (${Pp.lbl}, SLA ${slaTxt})`,
+      f:`${max} h/mes/eq primeros ${P.K} — luego ${piso} h/mes/eq`,
+      h: horasMesNorm * meses,
+      unit:`${N_norm} equipos · ${horasMesNorm.toFixed(2)} h/mes en total × ${meses} meses` });
+  }
+  if (N_baja > 0) {
+    desglose.push({
+      t:`Atención de tickets — equipos de baja criticidad`,
+      f:`tarifa escalonada por cantidad${es24x7 ? ` (×${P.bajaCrit.sla24x7Mult} por SLA 24×7)` : ''}`,
+      h: horasMesBaja * meses,
+      unit:`${N_baja} equipos (AP / cámara / teléfono IP) · ${horasMesBaja.toFixed(2)} h/mes en total × ${meses} meses` });
+  }
+
+  return { hTec, desglose };
 }
 
 function calcSS() {
