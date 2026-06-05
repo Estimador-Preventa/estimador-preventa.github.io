@@ -305,9 +305,10 @@ input:checked+.slider:before{transform:translateX(20px)}
         <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2"><span class="text-xs text-slate-600">Activar horas PM</span><label class="toggle"><input type="checkbox" id="g_inc_pm" onchange="recalc()"><span class="slider"></span></label></div>
         <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2"><span class="text-xs text-slate-600">Activar horas Imprevistos</span><label class="toggle"><input type="checkbox" id="g_inc_imp" onchange="recalc()"><span class="slider"></span></label></div>
       </div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-        <div><label class="text-xs text-slate-500 block mb-1">Otros (horas) <span class="text-slate-400">— global</span></label><input type="number" id="g_otros" value="0" min="0" class="ni" oninput="recalc()"></div>
-        <div><label class="text-xs text-slate-500 block mb-1">Concepto de "Otros" <span id="g_otros_req" class="text-red-500 hidden">*</span></label><input type="text" id="g_otros_lbl" placeholder="ej. Coordinación con cliente" class="ni" oninput="recalc()"></div>
+      <div class="mt-3">
+        <label class="text-xs text-slate-500 block mb-1">Otros — horas adicionales del proyecto</label>
+        <div id="otros_list" class="space-y-2"></div>
+        <button type="button" onclick="otrosAddItem()" class="mt-2 text-xs text-blue-700 hover:text-blue-900 font-semibold">+ Agregar otro</button>
       </div>
       <p id="g_otros_warn" class="text-xs text-red-600 mt-2 hidden">⚠ El concepto es obligatorio cuando se ingresan horas en "Otros".</p>
     </div>
@@ -1229,6 +1230,7 @@ input:checked+.slider:before{transform:translateX(20px)}
   <div class="sec-body" id="body_cctv">
     <div class="p-4 pt-0 grid grid-cols-2 sm:grid-cols-4 gap-4">
       <div><label class="text-xs text-slate-500 block mb-1">Cantidad de DVRs / NVRs</label><input type="number" id="cctv_dvr" value="0" min="0" class="ni" oninput="recalc()"></div>
+      <div><label class="text-xs text-slate-500 block mb-1">Cantidad de Grabador DVR/NVR Small</label><input type="number" id="cctv_small" value="0" min="0" class="ni" oninput="recalc()"></div>
       <div><label class="text-xs text-slate-500 block mb-1">Cantidad de Cámaras</label><input type="number" id="cctv_cam" value="0" min="0" class="ni" oninput="recalc()"></div>
     </div>
     <div class="px-4 pb-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -1583,6 +1585,11 @@ const PARAMS_DEFAULTS = {
     pruCam: 0,             // pruebas batch de cámaras
     docBase: 1.0,          // h base documento
     docPerCam: 0.05,       // h adicional por cámara (3 min)
+    // Grabador DVR/NVR Small — equipo chico plug-and-play, 4 h totales por unidad
+    smallRac: 0.5,         // rackeo / instalación física (solo si instalación física)
+    smallIos: 0.5,         // firmware
+    smallCfg: 2.0,         // configuración
+    smallPru: 1.0,         // pruebas funcionales
   },
   ar: {
     base: 4,                // h base del proyecto (kick-off + scope inicial)
@@ -4247,11 +4254,15 @@ function calcTP() {
 //  Sin Meraki, sin HA. DVR/NVR + cámaras + 3 toggles.
 // =========================================================
 function calcCCTV() {
-  const dvrInput = n('cctv_dvr'), totalCam = n('cctv_cam');
-  if (dvrInput === 0 && totalCam === 0) return Z();
+  const dvrInput = n('cctv_dvr'), totalCam = n('cctv_cam'), nSmall = n('cctv_small');
+  if (dvrInput === 0 && totalCam === 0 && nSmall === 0) return Z();
 
   const isFis = b('cctv_fis'), isSolo = b('cctv_solo'), isCfgActual = b('cctv_cfg');
   const P = PARAMS.cctv;
+
+  // === GRABADOR DVR/NVR SMALL — 4 h por unidad (rackeo solo si instalación física) ===
+  const smallPorUnidad = (isFis ? P.smallRac : 0) + P.smallIos + P.smallCfg + P.smallPru;
+  const H_small = nSmall * smallPorUnidad;
 
   // Si "solo agregar cámaras", el DVR efectivo es 0 (no hay trabajo de DVR)
   const dvr = isSolo ? 0 : dvrInput;
@@ -4284,7 +4295,7 @@ function calcCCTV() {
   // === DOCUMENTO ===
   const H_doc = P.docBase + P.docPerCam * totalCam;
 
-  const hTec = H_eng + H_rac + H_ios_dvr + H_cfg_dvr + H_cfg_cam + H_pru_dvr + H_pru_cam + H_doc;
+  const hTec = H_eng + H_rac + H_ios_dvr + H_cfg_dvr + H_cfg_cam + H_pru_dvr + H_pru_cam + H_doc + H_small;
 
   const engLabel = isSolo
     ? `${humanH(P.engOnlyCamBase)} base + ${humanH(P.engOnlyCamPerCam)} por cámara`
@@ -4311,6 +4322,9 @@ function calcCCTV() {
         h: H_pru_cam, unit:`${totalCam} cámaras` },
       { t:'Documento final', f:`${humanH(P.docBase)} base + ${humanH(P.docPerCam)} por cámara`,
         h: H_doc, unit:`${totalCam} cámaras` },
+      { t:'Grabador DVR/NVR Small (rackeo + firmware + configuración + pruebas)',
+        f:`${humanH(smallPorUnidad)} por grabador small`,
+        h: H_small, unit: nSmall>0 ? `${nSmall} grabador${nSmall>1?'es':''} small` : '—' },
     ]
   };
 }
@@ -4345,6 +4359,36 @@ const SECTIONS = [
 ];
 
 // =========================================================
+//  OTROS — lista dinámica de horas adicionales {concepto, horas}
+// =========================================================
+let otros_items = [{ concepto:'', horas:0 }];
+
+function otrosRenderList() {
+  const cont = document.getElementById('otros_list');
+  if (!cont) return;
+  const esc = s => (s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'));
+  cont.innerHTML = otros_items.map((it,i) => `
+    <div class="flex items-center gap-2">
+      <input type="text" data-otros-c="${i}" value="${esc(it.concepto)}" placeholder="ej. Coordinación con cliente" class="ni flex-1" oninput="otrosUpdate(${i},'concepto',this.value)">
+      <input type="number" data-otros-h="${i}" value="${it.horas||0}" min="0" step="0.5" class="ni w-24" oninput="otrosUpdate(${i},'horas',this.value)">
+      <span class="text-xs text-slate-400">h</span>
+      <button type="button" onclick="otrosRemoveItem(${i})" class="text-red-500 hover:text-red-700 px-1 text-base leading-none" title="Eliminar">×</button>
+    </div>`).join('');
+}
+function otrosAddItem() { otros_items.push({ concepto:'', horas:0 }); otrosRenderList(); }
+function otrosRemoveItem(i) {
+  otros_items.splice(i,1);
+  if (otros_items.length === 0) otros_items.push({ concepto:'', horas:0 });
+  otrosRenderList(); recalc();
+}
+function otrosUpdate(i, field, val) {
+  if (!otros_items[i]) return;
+  if (field === 'horas') otros_items[i].horas = parseFloat(val) || 0;
+  else otros_items[i].concepto = val;
+  recalc();
+}
+
+// =========================================================
 //  MAIN RECALC
 // =========================================================
 let lastResults = {};
@@ -4369,16 +4413,29 @@ function recalc() {
     }
   });
 
-  // ===== GLOBAL: Otros (horas) + concepto obligatorio =====
-  const gOtrosH = n('g_otros');
-  const gOtrosLbl = ($('g_otros_lbl')?.value || '').trim();
-  const otrosNeedsLbl = gOtrosH > 0 && !gOtrosLbl;
-  $('g_otros_req')?.classList.toggle('hidden', !otrosNeedsLbl);
+  // ===== GLOBAL: Otros (lista dinámica de {concepto, horas}) =====
+  let gOtrosH = 0;
+  let otrosNeedsLbl = false;
+  const otrosLines = [];   // [{concepto, horas}] con horas > 0
+  otros_items.forEach(it => {
+    const h = it.horas || 0;
+    if (h > 0) {
+      gOtrosH += h;
+      const c = (it.concepto || '').trim();
+      if (!c) otrosNeedsLbl = true;
+      otrosLines.push({ concepto: c || '(sin concepto)', horas: h });
+    }
+  });
+  // Marcar en rojo los conceptos vacíos que tienen horas
+  otros_items.forEach((it, i) => {
+    const inp = document.querySelector(`[data-otros-c="${i}"]`);
+    if (inp) {
+      const bad = (it.horas > 0) && !((it.concepto || '').trim());
+      inp.style.borderColor = bad ? '#EF4444' : '';
+      inp.style.boxShadow  = bad ? '0 0 0 3px rgba(239,68,68,.15)' : '';
+    }
+  });
   $('g_otros_warn')?.classList.toggle('hidden', !otrosNeedsLbl);
-  if ($('g_otros_lbl')) {
-    $('g_otros_lbl').style.borderColor = otrosNeedsLbl ? '#EF4444' : '';
-    $('g_otros_lbl').style.boxShadow = otrosNeedsLbl ? '0 0 0 3px rgba(239,68,68,.15)' : '';
-  }
 
   // ===== Base hTec (secciones + Otros) — usada para calcular Preventa/PM/Imp =====
   const totHTecBase = totHTecSec + gOtrosH;
@@ -4397,9 +4454,10 @@ function recalc() {
   // ===== hTec total del proyecto = base + extras activos =====
   const totHTec = totHTecBase + totHPrev + totHPM + totHImp;
 
-  if (gOtrosH > 0) {
-    hLines.push(`<div class="flex justify-between py-0.5 border-t border-white/10 mt-1 pt-1"><span class="text-blue-200 text-xs">+ Otros: <em class="text-blue-300/80">${gOtrosLbl||'(sin concepto)'}</em></span><span class="text-white text-xs font-medium">${fh(gOtrosH)}</span></div>`);
-  }
+  otrosLines.forEach((o, idx) => {
+    const topBorder = idx === 0 ? 'border-t border-white/10 mt-1 pt-1' : '';
+    hLines.push(`<div class="flex justify-between py-0.5 ${topBorder}"><span class="text-blue-200 text-xs">+ Otros: <em class="text-blue-300/80">${o.concepto}</em></span><span class="text-white text-xs font-medium">${fh(o.horas)}</span></div>`);
+  });
   if (totHPrev > 0) {
     hLines.push(`<div class="flex justify-between py-0.5"><span class="text-blue-200 text-xs">+ Preventa (${(pctPrev*100).toFixed(1).replace(/\.0$/,'')}%)</span><span class="text-white text-xs font-medium">${fh(totHPrev)}</span></div>`);
   }
@@ -4413,7 +4471,7 @@ function recalc() {
 
   // Persistir info global para admin
   lastResults.__global = {
-    gOtrosH, gOtrosLbl: gOtrosLbl || '(sin concepto)',
+    gOtrosH, otrosLines,
     pctPrev, pctPM, pctImp, incPrev, incPM, incImp,
     totHTec, totHTecBase, totHTecSec, totHPrev, totHPM, totHImp
   };
@@ -4428,7 +4486,7 @@ function buildAdminContent() {
   let html = '';
 
   const g = lastResults.__global || {
-    gOtrosH:0, gOtrosLbl:'(sin concepto)',
+    gOtrosH:0, otrosLines:[],
     pctPrev:0.05, pctPM:0.05, pctImp:0.05, incPrev:false, incPM:false, incImp:false,
     totHTec:0, totHTecBase:0, totHTecSec:0, totHPrev:0, totHPM:0, totHImp:0
   };
@@ -4467,12 +4525,12 @@ function buildAdminContent() {
               <td class="text-slate-400">Suma de horas técnicas de todas las secciones usadas</td>
               <td class="col-h text-blue-300 font-semibold">${fhCell(g.totHTecSec)}</td>
             </tr>
-            ${g.gOtrosH > 0 ? `
+            ${(g.otrosLines||[]).map(o => `
             <tr>
               <td class="text-blue-300">Horas adicionales (Otros)</td>
-              <td class="text-slate-400">Concepto: <em class="text-blue-200">${g.gOtrosLbl}</em></td>
-              <td class="col-h text-blue-300 font-semibold">${fhCell(g.gOtrosH)}</td>
-            </tr>` : ''}
+              <td class="text-slate-400">Concepto: <em class="text-blue-200">${o.concepto}</em></td>
+              <td class="col-h text-blue-300 font-semibold">${fhCell(o.horas)}</td>
+            </tr>`).join('')}
             <tr>
               <td class="text-cyan-300">Horas Preventa</td>
               <td class="text-slate-400">${g.incPrev ? `Diseño de la solución (${pctPrevTxt} de las horas técnicas)` : '<span class="muted italic">desactivado</span>'}</td>
@@ -4790,6 +4848,7 @@ function estSnapshot() {
   snap.inventories.mp = JSON.parse(JSON.stringify(typeof mp_inventory !== 'undefined' ? mp_inventory : []));
   snap.inventories.sc = JSON.parse(JSON.stringify(typeof sc_inventory !== 'undefined' ? sc_inventory : []));
   snap.inventories.tc = JSON.parse(JSON.stringify(typeof tc_capacitaciones !== 'undefined' ? tc_capacitaciones : []));
+  snap.inventories.otros = JSON.parse(JSON.stringify(typeof otros_items !== 'undefined' ? otros_items : []));
   return snap;
 }
 
@@ -4813,10 +4872,15 @@ function estRestore(snap) {
     if (typeof mp_inventory !== 'undefined') mp_inventory = snap.inventories.mp || [];
     if (typeof sc_inventory !== 'undefined') sc_inventory = snap.inventories.sc || [];
     if (typeof tc_capacitaciones !== 'undefined') tc_capacitaciones = snap.inventories.tc || [];
+    if (typeof otros_items !== 'undefined') {
+      const ot = snap.inventories.otros;
+      otros_items = (ot && ot.length) ? ot : [{ concepto:'', horas:0 }];
+    }
   }
   if (typeof mpRenderInventory === 'function') mpRenderInventory();
   if (typeof scRenderInventory === 'function') scRenderInventory();
   if (typeof tcRenderList === 'function') tcRenderList();
+  if (typeof otrosRenderList === 'function') otrosRenderList();
   // Re-disparar handlers especiales (atenuaciones, hints, sub-selectores)
   if ($('umb_prod') && typeof umbOnProdChange === 'function') umbOnProdChange();
   if ($('osec_prod') && typeof osecOnProdChange === 'function') osecOnProdChange();
@@ -5371,9 +5435,11 @@ function resetAllSilent() {
   if (typeof mp_inventory !== 'undefined')      mp_inventory = [];
   if (typeof sc_inventory !== 'undefined')      sc_inventory = [];
   if (typeof tc_capacitaciones !== 'undefined') tc_capacitaciones = [];
+  if (typeof otros_items !== 'undefined')       otros_items = [{ concepto:'', horas:0 }];
   if (typeof mpRenderInventory === 'function')  mpRenderInventory();
   if (typeof scRenderInventory === 'function')  scRenderInventory();
   if (typeof tcRenderList === 'function')       tcRenderList();
+  if (typeof otrosRenderList === 'function')    otrosRenderList();
   // Re-disparar handlers especiales para que las atenuaciones queden coherentes
   if ($('umb_prod')  && typeof umbOnProdChange  === 'function') umbOnProdChange();
   if ($('osec_prod') && typeof osecOnProdChange === 'function') osecOnProdChange();
@@ -5403,6 +5469,7 @@ document.addEventListener('DOMContentLoaded', () => {
   scRenderInventory();
   tcInitSelect();
   tcRenderList();
+  otrosRenderList();
   // Inicializar estado del módulo Umbrella (atenuaciones, hints)
   if ($('umb_prod')) umbOnProdChange();
   // Inicializar estado del módulo Otros productos de Seguridad
